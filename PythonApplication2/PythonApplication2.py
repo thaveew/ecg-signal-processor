@@ -172,12 +172,45 @@ def heart_rate_from_r_peaks(r_peaks, fs=360):
     heart_rate = 60 / rr_intervals  # convert to BPM
     return heart_rate
 
+def heart_rate_variability(r_peaks, fs=360):
+    """
+    Calculate heart rate variability (HRV) metrics from R-peak indices.
+    
+    r_peaks: array of R-peak indices
+    fs: sampling frequency (Hz)
+    
+    Returns: HRV metrics (e.g., SDNN, RMSSD)
+    """
+    rr_intervals = np.diff(r_peaks) / fs  # in seconds
+    sdnn = np.std(rr_intervals)  # Standard deviation of NN intervals
+    rmssd = np.sqrt(np.mean(np.square(np.diff(rr_intervals))))  # Root mean square of successive differences
+    return sdnn, rmssd
+
+def poincare_plot(r_peaks, fs=360):
+    """
+    Generate a Poincare plot from R-peak indices.
+    
+    r_peaks: array of R-peak indices
+    fs: sampling frequency (Hz)
+    
+    Returns: x and y coordinates for the Poincare plot
+    """
+    rr_intervals = np.diff(r_peaks) / fs  # in seconds
+    x = rr_intervals[:-1]
+    y = rr_intervals[1:]
+    return x, y
 
 # Create a figure with 4 subplots vertically stacked
 fig, axes = plt.subplots(2, 1)
 
 #Create a figure with 2 subplots vertically stacked
 fig, axes_rate = plt.subplots(2, 1, figsize=(12, 8))
+
+#create a figure with 2 subplots vertically stacked
+fig, axes_hrv = plt.subplots(2, 1, figsize=(12, 8))
+
+#create a figure with 2 subplots vertically stacked
+fig, axes_poincare = plt.subplots(2, 1, figsize=(12, 8))    
 
 # Plot Channel 0 (MLII) on the top graph
 filtered_signal_1 = bandpass_filter(1,ecg_signals, lowcut=20, highcut=80)
@@ -242,6 +275,31 @@ axes_rate[1].set_xlabel("Sample Index")
 axes_rate[1].set_ylabel("BPM")
 axes_rate[1].legend()
 axes_rate[1].grid(True)
+
+#plot heart rate variability for channel 0
+sdnn_0, rmssd_0 = heart_rate_variability(true_peaks_1)
+axes_hrv[0].bar(['SDNN', 'RMSSD'], [sdnn_0, rmssd_0], color=['blue', 'cyan'])
+
+#plot heart rate variability for channel 1
+sdnn_1, rmssd_1 = heart_rate_variability(true_peaks_2)
+axes_hrv[1].bar(['SDNN', 'RMSSD'], [sdnn_1, rmssd_1], color=['red', 'orange'])
+
+#plot poincare plot for channel 0
+x_0, y_0 = poincare_plot(true_peaks_1)
+axes_poincare[0].scatter(x_0, y_0, color='blue', alpha=0.5)
+axes_poincare[0].set_title("Poincare Plot Channel 0")
+axes_poincare[0].set_xlabel("RR(n) (s)")
+axes_poincare[0].set_ylabel("RR(n+1) (s)")
+axes_poincare[0].grid(True)
+
+#plot poincare plot for channel 1
+x_1, y_1 = poincare_plot(true_peaks_2)
+axes_poincare[1].scatter(x_1, y_1, color='red', alpha=0.5)
+axes_poincare[1].set_title("Poincare Plot Channel 1")
+axes_poincare[1].set_xlabel("RR(n) (s)")
+axes_poincare[1].set_ylabel("RR(n+1) (s)")
+axes_poincare[1].grid(True)
+
 
 plt.tight_layout()
 plt.show()
