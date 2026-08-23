@@ -6,12 +6,12 @@ from scipy.signal import butter, filtfilt, iirnotch
 fs = 360  # sampling rate in Hz
 
 # Load record 100
-record = wfdb.rdrecord('100')
+record = wfdb.rdrecord('121')
 ecg_signals = record.p_signal
 
 def bandpass_filter(index, data, lowcut, highcut, fs=360, order=4):
     """
-    data: input signal (2D array)
+    data: input signal (1D array)
     lowcut: lower cutoff frequency (Hz)
     highcut: upper cutoff frequency (Hz)
     fs: sampling frequency (Hz)
@@ -24,13 +24,13 @@ def bandpass_filter(index, data, lowcut, highcut, fs=360, order=4):
     # Filter along samples axis (rows) for each channel
     filtered = filtfilt(b, a, data, axis=0)
     if index == 1:
-        return filtered[:1000, 0]  # channel 0
+        return filtered[:4000, 0]  # channel 0
     else:
-        return filtered[:1000, 1]  # channel 1
+        return filtered[:4000, 1]  # channel 1
 
 def notch_filter(data, notch_freq=60 , fs = 360, quality_factor=30):
     """
-    data: input signal (2D array)
+    data: input signal (1D array)
     notch_freq: frequency to remove (Hz), e.g. 60 for US power line hum
     fs: sampling frequency (Hz)
     quality_factor: controls how narrow the notch is (higher = narrower)
@@ -159,47 +159,89 @@ def refine_peak_locations(raw_signal, candidate_peaks, fs=360, search_window_ms=
     
     return np.array(refined_peaks)
 
+def heart_rate_from_r_peaks(r_peaks, fs=360):
+    """
+    Calculate heart rate from R-peak indices.
+    
+    r_peaks: array of R-peak indices
+    fs: sampling frequency (Hz)
+    
+    Returns: heart rate in beats per minute (BPM)
+    """
+    rr_intervals = np.diff(r_peaks) / fs  # in seconds
+    heart_rate = 60 / rr_intervals  # convert to BPM
+    return heart_rate
+
+
 # Create a figure with 4 subplots vertically stacked
-fig, axes = plt.subplots(4, 1)
+fig, axes = plt.subplots(2, 1)
+
+#Create a figure with 2 subplots vertically stacked
+fig, axes_rate = plt.subplots(2, 1, figsize=(12, 8))
 
 # Plot Channel 0 (MLII) on the top graph
 filtered_signal_1 = bandpass_filter(1,ecg_signals, lowcut=20, highcut=80)
 filtered_signal_1 = notch_filter(filtered_signal_1)
-axes[0].plot(filtered_signal_1, color='blue')
-axes[0].set_title(f"Channel 0: {record.sig_name[0]}")
-axes[0].set_ylabel("Voltage (mV)")
-axes[0].grid(True)
+""""
+axes[0,0].plot(filtered_signal_1, color='blue')
+axes[0,0].set_title(f"Channel 0: {record.sig_name[0]}")
+axes[0,0].set_ylabel("Voltage (mV)")
+axes[0,0].grid(True)
+"""
 
 # Plot Channel 1 (V1) on the bottom graph 
 filtered_signal_2 = bandpass_filter(2,ecg_signals, lowcut=20, highcut=80)
 filtered_signal_2 = notch_filter(filtered_signal_2)
-axes[1].plot(filtered_signal_2, color='red')
-axes[1].set_title(f"Channel 1: {record.sig_name[1]}")
-axes[1].set_xlabel("Sample Index")
-axes[1].set_ylabel("Voltage (mV)")
-axes[1].grid(True)
+"""
+axes[0,1].plot(filtered_signal_2, color='red')
+axes[0,1].set_title(f"Channel 1: {record.sig_name[1]}")
+axes[0,1].set_xlabel("Sample Index")
+axes[0,1].set_ylabel("Voltage (mV)")
+axes[0,1].grid(True)
+"""
 
 # Apply Pan-Tompkins algorithm to detect R-peaks in Channel 0
 r_peaks = pan_tompkins(filtered_signal_1)
 true_peaks_1 = refine_peak_locations(filtered_signal_1, r_peaks)  
-axes[2].plot(filtered_signal_1, color='blue', label='Filtered Signal_1')
-axes[2].plot(true_peaks_1, filtered_signal_1[true_peaks_1], 'ro', label='R-peaks')
-axes[2].set_title("R-peaks Detection")
-axes[2].set_xlabel("Sample Index")
-axes[2].set_ylabel("Voltage (mV)")
-axes[2].legend()
-axes[2].grid(True)
+axes[0].plot(filtered_signal_1, color='blue', label='Filtered Signal_1')
+axes[0].plot(true_peaks_1, filtered_signal_1[true_peaks_1], 'bo', label='R-peaks')
+axes[0].set_title("R-peaks Detection")
+axes[0].set_xlabel("Sample Index")
+axes[0].set_ylabel("Voltage (mV)")
+axes[0].legend()
+axes[0].grid(True)
+
 
 # Apply pan-Tompkins algorithm to detect R-peaks in Channel 1   
 r_peaks_2 = pan_tompkins(filtered_signal_2)
 true_peaks_2 = refine_peak_locations(filtered_signal_2, r_peaks_2)
-axes[3].plot(filtered_signal_2, color='red', label='Filtered Signal_2')
-axes[3].plot(true_peaks_2, filtered_signal_2[true_peaks_2], 'ro', label='R-peaks')
-axes[3].set_title("R-peaks Detection")
-axes[3].set_xlabel("Sample Index")
-axes[3].set_ylabel("Voltage (mV)")
-axes[2].legend()
-axes[2].grid(True)
+axes[1].plot(filtered_signal_2, color='red', label='Filtered Signal_2')
+axes[1].plot(true_peaks_2, filtered_signal_2[true_peaks_2], 'ro', label='R-peaks')
+axes[1].set_title("R-peaks Detection")
+axes[1].set_xlabel("Sample Index")
+axes[1].set_ylabel("Voltage (mV)")
+axes[1].legend()
+axes[1].grid(True)
+
+#plot heart rate for channel 0
+hr_times_0 = true_peaks_1[1:]           
+heart_rate_0 = heart_rate_from_r_peaks(true_peaks_1)
+axes_rate[0].plot(hr_times_0,heart_rate_0, color='blue', label='Heart Rate Channel 0')
+axes_rate[0].set_title("Heart Rate Channel 0")
+axes_rate[0].set_xlabel("Sample Index")
+axes_rate[0].set_ylabel("BPM")
+axes_rate[0].legend()
+axes_rate[0].grid(True)
+
+#plot heart rate for channel 1
+hr_times_1 = true_peaks_2[1:]
+heart_rate_1 = heart_rate_from_r_peaks(true_peaks_2)
+axes_rate[1].plot(hr_times_1,heart_rate_1, color='red', label='Heart Rate Channel 1')
+axes_rate[1].set_title("Heart Rate Channel 1")
+axes_rate[1].set_xlabel("Sample Index")
+axes_rate[1].set_ylabel("BPM")
+axes_rate[1].legend()
+axes_rate[1].grid(True)
 
 plt.tight_layout()
 plt.show()
