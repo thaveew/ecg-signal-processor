@@ -12,13 +12,18 @@ Pipeline stages:
 Evaluation uses an INTER-PATIENT split (DS1 / DS2), not a random 80/20 split.
 See the note above build_dataset() for why this matters for ECG data specifically.
 """
-from numpy import ma
+
 import wfdb
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.signal import butter, filtfilt, iirnotch
 from sklearn.tree import DecisionTreeClassifier
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import confusion_matrix, accuracy_score, precision_recall_fscore_support
+
+import tkinter as tk
+from tkinter import ttk
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 fs = 360  #  MIT BIH Arrhythmia Database sampling rate (Hz) shared by every record used here
 
@@ -268,51 +273,68 @@ def to_binary_label(symbol):
     """ Return 0 for normal beats ('N') and 1 for abnormal beats (all others). """
     return 0 if symbol == 'N' else 1
 
+def process_record(rec_name):
 
-def build_dataset(record_list):
-    fs= 360  # Sampling frequency (Hz)
-
-    X, y = [], []
+    record = wfdb.rdrecord(rec_name)
+    annotation = wfdb.rdann(rec_name, 'atr')
+    fs = 360 #Sample frequency
+ 
+    # Clean the signal with a bandpass filter and notch filter
+    raw_signal = record.p_signal[:, 0]
+    filtered = bandpass_filter(raw_signal, lowcut=0.5, highcut=40, fs=fs)
+    filtered = notch_filter(filtered, fs=fs)
+ 
+    # Detecting the actual peaks 
+    candidate_peaks = pan_tompkins(filtered, fs=360)
+    my_peaks = refine_peak_locations(filtered, candidate_peaks, fs=fs)
+ 
+    # Masking the real annoations with targeted peaks
+    beat_mask = np.isin(annotation.symbol, BEAT_SYMBOLS)
+    true_peaks_annotation = annotation.sample[beat_mask]
+    true_symbols = np.array(annotation.symbol)[beat_mask]
+ 
     match_tolerance = int(0.05 * fs)  # 50ms tolerance for matching detected peaks to true annotations
-
-    for rec_name in record_list:
-        record = wfdb.rdrecord(rec_name)
-        annotation = wfdb.rdann(rec_name, 'atr')       
-        fs = 360
-
-        # --- Clean the signal (wide band: keeps 5-15Hz intact for pan_tompkins) ---
-        raw_signal = record.p_signal[:, 0]
-        filtered = bandpass_filter(raw_signal, lowcut=0.5, highcut=40)
-        filtered = notch_filter(filtered, fs=fs)
-
-        # --- Detect QRS complexes ---
-        candidate_peaks = pan_tompkins(filtered)
-        my_peaks_index = refine_peak_locations(filtered, candidate_peaks)
-
-        # --- Align detected peaks with true annotations ---
-        beat_mask = np.isin(annotation.symbol, BEAT_SYMBOLS)
-        true_peaks_annotation = annotation.sample[beat_mask]
-        true_symbols = np.array(annotation.symbol)[beat_mask]
-
-
-        for i in range (1, len(my_peaks_index) - 1):  
-            
-            idx_closest_index = np.argmin(np.abs(true_peaks_annotation - my_peaks_index[i])) #index where the peak is closest to the true annotation
-            if abs(true_peaks_annotation[idx_closest_index] - my_peaks_index[i]) > match_tolerance:
-                continue # no confident matching annotation for this detected peak
-
-            symbol = true_symbols[idx_closest_index]
-           
-            rr_prev = (my_peaks_index[i] - my_peaks_index[i-1]) / fs
-            rr_next = (my_peaks_index[i+1] - my_peaks_index[i]) / fs
-            amplitude = filtered[my_peaks_index[i]]
-            qrs_width = compute_qrs_width(filtered, my_peaks_index[i], fs=360)
-
-
-            X.append([rr_prev, rr_next, amplitude, qrs_width])
-            y.append(to_binary_label(symbol))
+    X, y, matched_peak_indices = [], [], []
+ 
    
-    return np.array(X), np.array(y)
+    for i in range(1, len(my_peaks) - 1):
+         # Finding the nearest real annotaion
+        idx_closest = np.argmin(np.abs(true_peaks_annotation - my_peaks[i]))
+        if abs(true_peaks_annotation[idx_closest] - my_peaks[i]) > match_tolerance:
+            continue
+ 
+        # Calculating the features for each peak
+        symbol = true_symbols[idx_closest]
+        rr_prev = (my_peaks[i] - my_peaks[i - 1]) / fs
+        rr_next = (my_peaks[i + 1] - my_peaks[i]) / fs
+        amplitude = filtered[my_peaks[i]]
+        qrs_width = compute_qrs_width(filtered, my_peaks[i], fs=fs)
+ 
+        X.append([rr_prev, rr_next, amplitude, qrs_width])
+        y.append(to_binary_label(symbol))
+        matched_peak_indices.append(my_peaks[i])
+ 
+    #Returning a dictionary
+    return {
+        "record_name": rec_name,
+        "filtered_signal": filtered,
+        "all_peaks": my_peaks,                       # every detected peak (for plotting)
+        "matched_peaks": np.array(matched_peak_indices),  # peaks that got a valid feature/label
+        "X": np.array(X),
+        "y": np.array(y),
+    }
+  
+def build_dataset(record_list):
+    """Combine process_record() output across many records into one training set."""
+    X_all, y_all = [], []
+    for rec_name in record_list:
+        result = process_record(rec_name)
+        if len(result["X"]) == 0:
+            continue
+        X_all.append(result["X"])
+        y_all.append(result["y"])
+    return np.vstack(X_all), np.concatenate(y_all)
+ 
 
 # 5. HRV / DERIVED METRICS (unchanged logic, kept for the visualization script)
 
@@ -365,69 +387,178 @@ Train_records = [
 Test_records = [
     '100', '103', '105', '111', '113', '117', '121', '123', '200', '202', '210', '212', '213', '214', '219', '221', '222', '228', '231', '232','233', '234',]
 
-# 7. VISUALIZATION (single-record exploratory plots)
 
-def plot_record_overview(record_name):
+# ============================================================
+# 5. GUI
+# ============================================================
+ 
+class ECGRecordViewer(tk.Tk):
     """
-    Plot an overview of the ECG record, including:
-    - Filtered signals for both channels
-    - Detected R-peaks
-    - Heart rate over time
-    - Heart rate variability metrics
-    - Poincare plot
-    record_name: name of the record to plot (e.g., '234')
+    Main window layout:
+      - Left column: one button per record.
+      - Top-right: filtered signal + detected peaks (always shown once a
+        record is selected).
+      - Middle-right: that record's confusion matrix, annotated with
+        accuracy/precision/recall/F1 (same numbers classification_report
+        would print, just for this one record).
+      - Bottom-right: a switchable panel - "Heart Rate", "HRV", or
+        "Poincare Plot" buttons choose what's drawn here, for whichever
+        record is currently selected.
     """
-    record = wfdb.rdrecord(record_name)
-    ecg_signals_0 = record.p_signal[:, 0]
-    ecg_signals_1 = record.p_signal[:, 1]
+ 
+    def __init__(self, clf, record_list):
+        super().__init__()
+        self.clf = clf
+        self.record_list = record_list
+        self.current_result = None      # process_record() output for the selected record
+        self.current_record_name = None
+        self.bottom_view = "heart_rate"  # which plot the bottom panel shows
+ 
+        self.title("ECG Per-Record Viewer")
+        self.geometry("1200x850")
+ 
+        # --- Left column: one button per record ---
+        record_frame = ttk.Frame(self)
+        record_frame.pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=8)
+ 
+        ttk.Label(record_frame, text="Records", font=("Segoe UI", 11, "bold")).pack(pady=(0, 8))
+        for rec_name in self.record_list:
+            ttk.Button(
+                record_frame, text=rec_name, width=10,
+                command=lambda r=rec_name: self.show_record(r)
+            ).pack(pady=2)
+ 
+        # --- Right side: view-selector buttons on top, plot canvas below ---
+        right_frame = ttk.Frame(self)
+        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=8, pady=8)
+ 
+        view_button_frame = ttk.Frame(right_frame)
+        view_button_frame.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
+ 
+        ttk.Label(view_button_frame, text="Bottom panel:").pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(view_button_frame, text="Heart Rate",
+                   command=lambda: self.set_bottom_view("heart_rate")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(view_button_frame, text="HRV",
+                   command=lambda: self.set_bottom_view("hrv")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(view_button_frame, text="Poincare Plot",
+                   command=lambda: self.set_bottom_view("poincare")).pack(side=tk.LEFT, padx=2)
+ 
+        self.figure = Figure(figsize=(9, 9), dpi=100)
+        self.canvas = FigureCanvasTkAgg(self.figure, master=right_frame)
+        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+ 
+        self.status_var = tk.StringVar(value="Select a record to view its results.")
+        ttk.Label(self, textvariable=self.status_var).pack(side=tk.BOTTOM, pady=4)
+ 
+    # ---- Called when a record button is clicked ----
+    def show_record(self, rec_name):
+        self.status_var.set(f"Processing record {rec_name}...")
+        self.update_idletasks()  # redraw the status text before the slower processing call runs
+ 
+        self.current_result = process_record(rec_name)
+        self.current_record_name = rec_name
+        self.render()
+ 
+        n_peaks = len(self.current_result["all_peaks"])
+        n_matched = len(self.current_result["X"])
+        self.status_var.set(f"Showing record {rec_name} "
+                             f"({n_peaks} peaks detected, {n_matched} beats matched to annotations).")
+ 
+    # ---- Called when a bottom-panel view button is clicked ----
+    def set_bottom_view(self, view_name):
+        self.bottom_view = view_name
+        if self.current_result is not None:
+            self.render()
+ 
+    # ---- Draws all panels for whichever record/view is currently selected ----
+    def render(self):
+        if self.current_result is None:
+            return
+ 
+        result = self.current_result
+        rec_name = self.current_record_name
+        filtered = result["filtered_signal"]
+        all_peaks = result["all_peaks"]
+        all_peaks_1 = all_peaks[:100]
+        X, y_true = result["X"], result["y"]
+ 
+        self.figure.clear()
+ 
+        # ---- Panel 1: filtered signal with detected peaks (first 3000 samples only) ----
+        display_range = 30000
+        signal_slice = filtered[:display_range]
 
-    filtered_signal_1 = notch_filter(bandpass_filter(ecg_signals_0, lowcut=0.5, highcut=40))
-    filtered_signal_2 = notch_filter(bandpass_filter(ecg_signals_1, lowcut=0.5, highcut=40))
+        # Keep only peaks that actually fall within this displayed window
+        peaks_in_range = all_peaks[all_peaks < display_range]
 
-    r_peaks_1 = refine_peak_locations(filtered_signal_1, pan_tompkins(filtered_signal_1))
-    r_peaks_2 = refine_peak_locations(filtered_signal_2, pan_tompkins(filtered_signal_2))
-
-    fig, axes = plt.subplots(2, 1, figsize=(12, 6))
-
-    for ax, sig, peaks, color, ch in (( axes[0], filtered_signal_1, r_peaks_1, 'blue', record.sig_name[0]), (axes[1], filtered_signal_2, r_peaks_2, 'red', record.sig_name[1])):
-
-        ax.plot(sig, color=color, label=f'Filtered {ch}')
-        ax.plot(peaks, sig[peaks], 'o', color='black', markersize=4, label='R-peaks')
-        ax.set_title(f"R-peaks Detection {ch}")
-        ax.set_xlabel("Sample Index")
-        ax.set_ylabel("Voltage (mV)")
-        ax.legend()
-        ax.grid(True)
-    plt.tight_layout()
-
-    fig_rate, axes_rate_0 = plt.subplots(2, 2, figsize=(12, 8))
-    fig_rate, axes_rate_1 = plt.subplots(2, 2, figsize=(12, 8))
-
-
-    for ax, peaks, color, ch in ((axes_rate_0, r_peaks_1, 'blue', record.sig_name[0]), (axes_rate_1, r_peaks_2, 'red', record.sig_name[1])):
-        hr = heart_rate_from_r_peaks(peaks)
-        hr_times = peaks[1:]  # Heart rate corresponds to intervals between peaks
-        ax[0,0].plot(hr_times, hr, color=color, label=f'Heart Rate {ch}')
-        ax[0,0].set_title(f"Heart Rate {ch}")
-        ax[0,0].set_xlabel("Sample Index")
-        ax[0,0].set_ylabel("BPM")
-        ax[0,0].legend()
-        ax[0,0].grid(True) 
-        
-        sdnn, rmssd = heart_rate_variability(peaks)
-        ax[0,1].bar(['SDNN', 'RMSSD'], [sdnn, rmssd], color=color)
-        
-
-        x, y = poincare_plot(peaks)
-        ax[1,0].scatter(x, y, color=color, alpha=0.5)
-        ax[1,0].set_title(f"Poincare Plot {ch}")
-        ax[1,0].set_xlabel("RR(n) (s)")
-        ax[1,0].set_ylabel("RR(n+1) (s)")
-        ax[1,0].grid(True)
-
-    plt.tight_layout()
-    plt.show()
-
+        ax_signal = self.figure.add_subplot(3, 1, 1)
+        ax_signal.plot(signal_slice, color='blue', linewidth=0.8)
+        ax_signal.plot(peaks_in_range, filtered[peaks_in_range], 'ro', markersize=3)    
+        ax_signal.set_title(f"Record {rec_name} - Filtered Signal & Detected Peaks")
+        ax_signal.set_xlabel("Sample Index")
+        ax_signal.set_ylabel("Voltage (mV)")
+ 
+        # ---- Panel 2: confusion matrix + accuracy/precision/recall/F1 ----
+        ax_cm = self.figure.add_subplot(3, 1, 2)
+        if len(X) > 0:
+            y_pred = self.clf.predict(X)
+            cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+ 
+            accuracy = accuracy_score(y_true, y_pred)
+            precision, recall, f1, support = precision_recall_fscore_support(
+                y_true, y_pred, labels=[0, 1], zero_division=0
+            )
+ 
+            ax_cm.imshow(cm, cmap='Blues')
+            for r in range(2):
+                for c in range(2):
+                    ax_cm.text(c, r, str(cm[r, c]), ha='center', va='center', fontsize=12)
+            ax_cm.set_xticks([0, 1]); ax_cm.set_xticklabels(['Normal', 'Abnormal'])
+            ax_cm.set_yticks([0, 1]); ax_cm.set_yticklabels(['Normal', 'Abnormal'])
+            ax_cm.set_xlabel("Predicted"); ax_cm.set_ylabel("Actual")
+            ax_cm.set_title(f"Confusion Matrix - Record {rec_name}  (Accuracy: {accuracy:.2f})")
+ 
+            # Metrics text block, same numbers classification_report() would print,
+            # placed beside the matrix rather than as a separate console printout.
+            metrics_text = (
+                f"{'':10s}{'Precision':>10s}{'Recall':>10s}{'F1':>8s}{'Support':>9s}\n"
+                f"{'Normal':10s}{precision[0]:>10.2f}{recall[0]:>10.2f}{f1[0]:>8.2f}{support[0]:>9d}\n"
+                f"{'Abnormal':10s}{precision[1]:>10.2f}{recall[1]:>10.2f}{f1[1]:>8.2f}{support[1]:>9d}"
+            )
+            self.figure.text(0.62, 0.53, metrics_text, family='monospace', fontsize=9,
+                              verticalalignment='center')
+        else:
+            ax_cm.text(0.5, 0.5, "No matched beats for this record", ha='center', va='center')
+            ax_cm.axis('off')
+ 
+        # ---- Panel 3: switchable bottom view (Heart Rate / HRV / Poincare) ----
+        ax_bottom = self.figure.add_subplot(3, 1, 3)
+        if len(all_peaks) > 2:
+            if self.bottom_view == "heart_rate":
+                hr = heart_rate_from_r_peaks(all_peaks)
+                ax_bottom.plot(all_peaks[1:], hr, color='green')
+                ax_bottom.set_title(f"Heart Rate - Record {rec_name}")
+                ax_bottom.set_xlabel("Sample Index")
+                ax_bottom.set_ylabel("BPM")
+ 
+            elif self.bottom_view == "hrv":
+                sdnn, rmssd = heart_rate_variability(all_peaks)
+                ax_bottom.bar(['SDNN', 'RMSSD'], [sdnn, rmssd], color=['steelblue', 'darkorange'])
+                ax_bottom.set_title(f"HRV - Record {rec_name}")
+                ax_bottom.set_ylabel("Seconds")
+ 
+            elif self.bottom_view == "poincare":
+                x_rr, y_rr = poincare_plot(all_peaks)
+                ax_bottom.scatter(x_rr, y_rr, color='purple', alpha=0.5, s=10)
+                ax_bottom.set_title(f"Poincare Plot - Record {rec_name}")
+                ax_bottom.set_xlabel("RR(n) (s)")
+                ax_bottom.set_ylabel("RR(n+1) (s)")
+        else:
+            ax_bottom.text(0.5, 0.5, "Not enough peaks for this view", ha='center', va='center')
+            ax_bottom.axis('off')
+ 
+        self.figure.tight_layout()
+        self.canvas.draw()
 
 # 8. MAIN build dataset, train, evaluate
 
@@ -445,12 +576,9 @@ if __name__ == "__main__":
     clf = DecisionTreeClassifier(max_depth=3, class_weight='balanced', random_state=42)
     clf.fit(X_train, y_train)
  
-    # Evaluate the classifier on the test set
-    y_pred = clf.predict(X_test)
-
-    # Print classification report and confusion matrix
-    print(classification_report(y_test, y_pred, target_names=['Normal', 'Abnormal'], zero_division=0), flush=True)
-    print(confusion_matrix(y_test, y_pred), flush=True)
-
-
+    print("Classifier trained. Launching GUI...")
+ 
+    #calling the GUI to visualize the results
+    app = ECGRecordViewer(clf, Test_records)
+    app.mainloop()
 
