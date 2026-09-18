@@ -275,8 +275,8 @@ def to_binary_label(symbol):
 
 def process_record(rec_name):
 
-    record = wfdb.rdrecord(rec_name, pn_dir ='mitdb')
-    annotation = wfdb.rdann(rec_name, 'atr', pn_dir ='mitdb')
+    record = wfdb.rdrecord(rec_name)
+    annotation = wfdb.rdann(rec_name, 'atr')
     fs = 360 #Sample frequency
  
     # Clean the signal with a bandpass filter and notch filter
