@@ -2,6 +2,8 @@
 
 A from-scratch Python implementation of the **Pan-Tompkins QRS detection algorithm**, applied to the [MIT-BIH Arrhythmia Database](https://physionet.org/content/mitdb/1.0.0/), with a feature-based classifier that flags detected beats as **Normal** or **Abnormal**, and a desktop GUI for inspecting results record-by-record.
 
+![Record 221](Record_221.png)
+![Record 228](Record_228.png)
 
 
 ## Features
